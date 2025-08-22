@@ -302,7 +302,7 @@ int list(int tar_fd, char *path, char **entries, size_t *no_entries) {
     }
 
     size_t base_len = strlen(base);
-
+  
     if (lseek(tar_fd, 0, SEEK_SET) == (off_t) -1) {
         return 0;
     }
@@ -326,6 +326,7 @@ int list(int tar_fd, char *path, char **entries, size_t *no_entries) {
                 if (count < capacity) {
                     strcpy(entries[count], name);
                     count++;
+
                 }
             }
         }
