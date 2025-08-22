@@ -88,6 +88,49 @@ static int find_header(int tar_fd, const char *path, tar_header_t *header,
 }
 
 /**
+ * Resolves a path by following symlinks until a non-symlink entry is found.
+ * The resolved header and data offset are returned through `header` and
+ * `data_offset` if non-NULL.  The canonical path of the resolved entry is
+ * written into `resolved` when provided.
+ */
+static int resolve_path(int tar_fd, const char *path, tar_header_t *header,
+                        off_t *data_offset, char *resolved) {
+    char current[256];
+    strncpy(current, path, sizeof(current) - 1);
+    current[255] = '\0';
+
+    size_t len = strlen(current);
+    if (len > 0 && current[len - 1] == '/') {
+        current[len - 1] = '\0';
+    }
+
+    for (int depth = 0; depth < 16; depth++) {
+        off_t off;
+        if (!find_header(tar_fd, current, header, &off)) {
+            return 0;
+        }
+        if (header->typeflag == SYMTYPE) {
+            strncpy(current, header->linkname, sizeof(current) - 1);
+            current[255] = '\0';
+            len = strlen(current);
+            if (len > 0 && current[len - 1] == '/') {
+                current[len - 1] = '\0';
+            }
+            continue;
+        }
+        if (resolved) {
+            header_path(resolved, header);
+        }
+        if (data_offset) {
+            *data_offset = off;
+        }
+        return 1;
+    }
+
+    return 0;
+}
+
+/**
  * Checks whether the archive is valid.
  *
  * Each non-null header of a valid archive has:
@@ -240,27 +283,31 @@ int list(int tar_fd, char *path, char **entries, size_t *no_entries) {
     size_t capacity = *no_entries;
     *no_entries = 0;
 
-    char norm[256];
+    char base[256];
+    tar_header_t hdr;
     if (path && path[0] != '\0') {
-        strncpy(norm, path, sizeof(norm));
-        norm[255] = '\0';
-        size_t len = strlen(norm);
-        if (norm[len - 1] != '/') {
-            norm[len] = '/';
-            norm[len + 1] = '\0';
+        if (!resolve_path(tar_fd, path, &hdr, NULL, base)) {
+            return 0;
+        }
+        if (hdr.typeflag != DIRTYPE) {
+            return 0;
+        }
+        size_t len = strlen(base);
+        if (len > 0 && base[len - 1] != '/') {
+            base[len] = '/';
+            base[len + 1] = '\0';
         }
     } else {
-        norm[0] = '\0';
+        base[0] = '\0';
     }
 
-    size_t base_len = strlen(norm);
-    int dir_found = (base_len == 0);
-
+    size_t base_len = strlen(base);
+  
     if (lseek(tar_fd, 0, SEEK_SET) == (off_t) -1) {
         return 0;
     }
 
-    tar_header_t hdr;
+    size_t count = 0;
     while (read(tar_fd, &hdr, sizeof(hdr)) == sizeof(hdr)) {
         if (is_empty_block(&hdr)) {
             break;
@@ -272,19 +319,14 @@ int list(int tar_fd, char *path, char **entries, size_t *no_entries) {
         size_t size = TAR_INT(hdr.size);
         off_t data_off = lseek(tar_fd, 0, SEEK_CUR);
 
-        if (!dir_found && hdr.typeflag == DIRTYPE && strcmp(name, norm) == 0) {
-            dir_found = 1;
-        }
-
-        if (strncmp(name, norm, base_len) == 0 && strcmp(name, norm) != 0) {
+        if (strncmp(name, base, base_len) == 0 && strcmp(name, base) != 0) {
             const char *rest = name + base_len;
             const char *slash = strchr(rest, '/');
             if (!slash || slash[1] == '\0') {
-                if (*no_entries < capacity) {
-                    strcpy(entries[*no_entries], name);
-                }
-                if (*no_entries < capacity) {
-                    (*no_entries)++;
+                if (count < capacity) {
+                    strcpy(entries[count], name);
+                    count++;
+
                 }
             }
         }
@@ -295,7 +337,8 @@ int list(int tar_fd, char *path, char **entries, size_t *no_entries) {
         }
     }
 
-    return dir_found;
+    *no_entries = count;
+    return 1;
 }
 
 /**
@@ -319,7 +362,7 @@ int list(int tar_fd, char *path, char **entries, size_t *no_entries) {
 ssize_t read_file(int tar_fd, char *path, size_t offset, uint8_t *dest, size_t *len) {
     tar_header_t hdr;
     off_t data_off;
-    if (!find_header(tar_fd, path, &hdr, &data_off)) {
+    if (!resolve_path(tar_fd, path, &hdr, &data_off, NULL)) {
         return -1;
     }
 
